@@ -20,6 +20,7 @@ ASSETS = Path(__file__).resolve().parent / 'assets'
 NONCOMBAT_TIME_LIMIT = 300
 NONCOMBAT_POLL_SECONDS = .5
 NONCOMBAT_TAP_INTERVAL = 2.
+MAIN_GUIDE_ARROW_RETRIES = 3
 ARK_NOTICE_DELAY = 5.
 # 相对中央卡片感叹号锚点的客户区偏移，不改变模板识别位置或主界面引导落点。
 ARK_NOTICE_CLICK_OFFSET = (-40., 65.)
@@ -271,6 +272,7 @@ class CampaignSceneController:
         self.returning_home = False
         self.preferred_difficulty = None
         self.difficulty_target = None
+        self.main_arrow_taps = 0
 
     def bind_field(self, identity):
         """绑定连续确认的野外身份，并在本次任务首次绑定时锁定难度。
@@ -294,6 +296,7 @@ class CampaignSceneController:
         self.entry_route_sent = False
         self.ark_arrow_at = None
         self.last_page = None
+        self.main_arrow_taps = 0
 
     def ensure_field(self):
         """从当前任意已支持页面返回可靠野外，连续三帧章节与难度一致后才交导航。
@@ -362,6 +365,11 @@ class CampaignSceneController:
             point = chapter_list_text_point(field, self.session.owner.chapter_ocr, CHAPTER_CARD_ROI, pattern)
             if point is not None:
                 self.tap(point, f'恢复章节 {chapter} {name}')
+        else:
+            pattern = rf'(?:CH\.?\s*)?0*{chapter}'
+            point = chapter_list_text_point(field, self.session.owner.chapter_ocr, CHAPTER_CARD_ROI, pattern)
+            if point is not None:
+                self.tap(point, f'恢复章节 {chapter}')
         return self.wait('difficulty_chapter', scores, field)
 
     def return_home(self, reason):
@@ -392,7 +400,7 @@ class CampaignSceneController:
                 self.ark_arrow_at = None
                 self.last_page = None
                 self.session.record('campaign_return_home_complete', field=result['field'], force=True, reason=reason)
-                if self.chapter is not None and self.preferred_difficulty == 'hard':
+                if self.chapter is not None and self.preferred_difficulty is not None:
                     self.difficulty_target = self.transition_expected or (self.chapter, self.preferred_difficulty)
                 logger.info('异常恢复已确认主界面，重新开始主线入口流程。')
                 return
@@ -445,6 +453,7 @@ class CampaignSceneController:
         self.deadline = time.monotonic() + NONCOMBAT_TIME_LIMIT
         self.ark_arrow_at = None
         self.last_page = None
+        self.main_arrow_taps = 0
         logger.info('开始处理主线入口及非野外场景。')
 
     def start_if_complete(self, field):
@@ -665,16 +674,24 @@ class CampaignSceneController:
             entry_score, entry_point = locate(field, self.templates, 'main_campaign_entry')
             scores['main_campaign_entry'] = round(entry_score, 3)
             restore_entry = self.difficulty_target is not None
-            if restore_entry:
+            fallback_entry = (not restore_entry and self.main_arrow_taps >= MAIN_GUIDE_ARROW_RETRIES
+                              and entry_point is not None)
+            if restore_entry or fallback_entry:
                 point = entry_point
             else:
                 point = arrow_point or self.ui_point(field, MAIN_GOTO_CAMPAIGN_SELECT, (700, 730, 1200, 999))
             if point is not None:
                 if restore_entry:
                     label = '主页作战入口恢复指定章节'
+                elif fallback_entry:
+                    label = '主页作战入口（引导箭头无响应回退）'
+                elif arrow_point is not None:
+                    label = '主页右上角引导箭头'
                 else:
-                    label = '主页右上角引导箭头' if arrow_point is not None else '主页作战入口'
-                self.tap(point, label)
+                    label = '主页作战入口'
+                if (self.tap(point, label) and not restore_entry and not fallback_entry
+                        and arrow_point is not None):
+                    self.main_arrow_taps += 1
             return self.wait('main', scores, field)
         if ark_point is not None and not self.returning_home:
             if self.ark_arrow_at is None and arrow_point is None:
@@ -757,6 +774,8 @@ class CampaignSceneController:
 
     def wait(self, state, scores, field):
         """记录本拍页面证据并限速等待，不改变状态或假定下一帧页面。"""
+        if state != 'main':
+            self.main_arrow_taps = 0
         if state != self.last_page:
             logger.info(f'场景接管页面：{state}。')
             self.last_page = state
